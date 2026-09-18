@@ -1,0 +1,58 @@
+/** Fireworks AI adapter — OpenAI-compatible (thin) + native passthrough. */
+
+import type { OpenAIChatRequest, ProviderAdapter } from "./types";
+import { stripProviderPrefix } from "./types";
+
+const BASE = "https://api.fireworks.ai/inference/v1";
+
+/**
+ * Fireworks exposes an OpenAI-compatible API rooted at `/inference/v1`, so the
+ * chat endpoint lives at `/inference/v1/chat/completions`. Model ids are the
+ * fully-qualified `accounts/fireworks/models/<name>` slugs.
+ */
+const fireworks: ProviderAdapter = {
+  name: "fireworks",
+
+  models(): string[] {
+    return [
+      "accounts/fireworks/models/llama-v3p1-8b-instruct",
+      "accounts/fireworks/models/llama-v3p3-70b-instruct",
+    ];
+  },
+
+  async chatCompletions(req: OpenAIChatRequest, key: string): Promise<Response> {
+    const body: OpenAIChatRequest = {
+      ...req,
+      model: stripProviderPrefix(req.model),
+    };
+    return fetch(`${BASE}/chat/completions`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${key}`,
+      },
+      body: JSON.stringify(body),
+    });
+  },
+
+  async passthrough(subPath: string, req: Request, key: string): Promise<Response> {
+    const url = `${BASE}${subPath}`;
+    const headers = new Headers(req.headers);
+    headers.set("Authorization", `Bearer ${key}`);
+    headers.delete("host");
+    headers.delete("content-length");
+    headers.delete("cookie");
+    headers.delete("x-goog-api-key");
+
+    const method = req.method.toUpperCase();
+    const hasBody = method !== "GET" && method !== "HEAD";
+
+    return fetch(url, {
+      method: req.method,
+      headers,
+      body: hasBody ? req.body : undefined,
+    });
+  },
+};
+
+export default fireworks;
