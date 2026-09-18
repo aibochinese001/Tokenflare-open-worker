@@ -1,0 +1,36 @@
+# .dev.vars.example — 本地开发变量模板（复制为 .dev.vars 使用，.dev.vars 不入库）
+# 生产环境用 `npx wrangler secret put <名字>` 逐项设置，不要写进 wrangler.toml。
+
+# --- 必填 ---
+# 管理后台/API 的 Bearer Token（自行生成：openssl rand -hex 24）
+ADMIN_TOKEN=replace-with-a-long-random-string
+
+# --- SSO（可选，不填则仅 ADMIN_TOKEN 认证） ---
+# OIDC issuer 基址，例如 https://your-idp.example.com
+OIDC_ISSUER=
+# OIDC 公开客户端 id
+OIDC_CLIENT_ID=
+# 该邮箱登录即管理员，其余人为普通用户
+ADMIN_EMAIL=
+# 签名会话 cookie 的密钥（32+ 字节随机串）
+SESSION_SECRET=
+
+# --- 计费（可选） ---
+# 在线充值（Stripe）
+STRIPE_SECRET_KEY=
+STRIPE_WEBHOOK_SECRET=
+# 跳转基址，例如 https://your-worker.example.com
+PUBLIC_BASE_URL=
+CURRENCY=usd
+
+# --- 其余可选 vars（也可放 wrangler.toml [vars]） ---
+# BRAND_NAME=keypool
+# SSO_LABEL=Sign in
+# SSO_NOTE=Single sign-on.
+# BILLING_ENABLED=1
+# DEFAULT_PRICE_MICRO=500000
+# DISCOUNT=0.1
+# SIGNUP_BONUS_USD=100
+# TRANSACTION_RETENTION_DAYS=90
+# PENDING_ORDER_RETENTION_DAYS=30
+# LOG_RETENTION_DAYS=30

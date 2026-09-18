@@ -1,0 +1,16 @@
+node_modules/
+.wrangler/
+.dev.vars
+dist/
+*.log
+.DS_Store
+.admin-token.txt
+.session-secret.txt
+
+# local real config (use wrangler.toml.example as the template)
+wrangler.toml
+# internal build-time design docs
+CONTRACTS*.md
+
+# local promo drafts (not part of the OSS repo)
+PROMO_DRAFTS.md

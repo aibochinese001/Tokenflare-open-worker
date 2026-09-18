@@ -1,0 +1,1 @@
+{"model":"deepseek-flash","messages":[{"role":"user","content":"Please repeat this exact test sentence for cache testing purposes. Cloudflare D1 gateway billing verification sequence 12345."}],"max_tokens":200,"stream":true}

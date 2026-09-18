@@ -1,0 +1,59 @@
+# Copy to `wrangler.toml` and fill in your own values.
+#   cp wrangler.toml.example wrangler.toml
+name = "llm-gateway"
+main = "src/index.ts"
+compatibility_date = "2026-06-01"
+compatibility_flags = ["nodejs_compat"]
+workers_dev = true
+
+# Optional: bind a custom domain. The zone must be in your Cloudflare account.
+# routes = [
+#   { pattern = "llm.example.com/*", zone_name = "example.com" }
+# ]
+
+# D1 database. Create it first:  wrangler d1 create llm-gateway
+# then paste the printed database_id here.
+[[d1_databases]]
+binding = "DB"
+database_name = "llm-gateway"
+database_id = "REPLACE_WITH_YOUR_D1_DATABASE_ID"
+
+# Unattended health check. Cloudflare's free plan allows up to 5 cron triggers
+# per account; if you're at the limit, drop this block and instead POST
+# /admin/probe periodically from an external pinger (cron-job.org, etc).
+[triggers]
+crons = ["*/5 * * * *"]
+
+[vars]
+COOLDOWN_MINUTES = "3"
+MAX_KEY_RETRIES = "4"
+PROBE_INTERVAL_MINUTES = "60"
+
+# --- Optional: OIDC SSO (omit to use ADMIN_TOKEN-only auth) ---
+# Any OIDC provider supporting Authorization Code + PKCE public clients.
+# OIDC_ISSUER = "https://your-idp.example.com"
+# OIDC_CLIENT_ID = "your-client-id"
+# ADMIN_EMAIL = "you@example.com"   # this email gets admin; others = pending users
+
+# --- Secrets (set with `wrangler secret put`, never commit) ---
+#   wrangler secret put ADMIN_TOKEN      # bearer token for admin/API access
+#   wrangler secret put SESSION_SECRET   # random 32+ bytes, signs session cookies
+
+# --- Optional: console branding ---
+# BRAND_NAME = "keypool"             # product name shown in the UI
+# SSO_LABEL  = "Sign in"             # login button text
+# SSO_NOTE   = "Single sign-on."     # hint under the login button
+
+# --- Optional: billing (credits) ---
+# BILLING_ENABLED = "1"             # enforce balances + charge per token
+# DEFAULT_PRICE_MICRO = "500000"    # micro-USD per 1M tokens when model not priced
+# DISCOUNT = "0.1"                  # global sell discount on the prices table (0.1 = 1折)
+# SIGNUP_BONUS_USD = "100"           # campaign: grant new users $100 once on first login
+
+# --- Optional: Stripe online top-up ---
+# PUBLIC_BASE_URL = "https://llm.example.com"   # Stripe success/cancel redirects
+# CURRENCY = "usd"
+# Secrets (set via the CLI; never commit):
+#   secret put STRIPE_SECRET_KEY        # sk_test_... / sk_live_...
+#   secret put STRIPE_WEBHOOK_SECRET    # whsec_... from the webhook endpoint
+# Point a Stripe webhook at https://<your-worker>/stripe/webhook (checkout.session.completed)
