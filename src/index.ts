@@ -92,7 +92,7 @@ app.get("/sw.js", (c) =>
 // RFC 9728 — OAuth 2.0 Protected Resource Metadata. This gateway is a
 // token-protected API (an OIDC relying party, NOT an authorization server), so
 // it advertises itself as a protected resource and points agents at its
-// authorization server (the SSO IdP) to obtain tokens.
+// authorization server (the leeguoo SSO IdP) to obtain tokens.
 app.get("/.well-known/oauth-protected-resource", (c) => {
   const as = (c.env.OIDC_ISSUER || "https://your-idp.example.com").replace(/\/$/, "");
   return c.json({
