@@ -1,4 +1,4 @@
--- Migration 2026-09-18: payment gateway config + orders.
+-- Migration 2026-09-18: payment gateway (易支付) config + orders.
 CREATE TABLE IF NOT EXISTS keypool_gateway_pay_config (
   k          TEXT PRIMARY KEY,
   v          TEXT NOT NULL,
