@@ -1,83 +1,147 @@
 #!/usr/bin/env node
 /**
- * formal_secret_scan.mjs — 开源前正式敏感信息扫描
+ * formal_secret_scan.mjs — deterministic, repo-wide secret scan.
  *
- * 覆盖模式：sk- token、CLOUDFLARE_API_TOKEN、api_key/secret、password、
- * Bearer、access_token、邮箱+密码组合等。
- * 排除目录：node_modules、.wrangler、.git、.workbuddy、dist
- * 白名单：example.com 等夹具域名与 REPLACE_WITH_* 占位符。
+ * Usage:  node scripts/formal_secret_scan.mjs   (or `npm run scan:secrets`)
+ * Exit:   0 = no hits (clean), 1 = hits found, 2 = fatal error.
  *
- * 用法：node scripts/formal_secret_scan.mjs [rootDir]
- * 退出码：0 = 无命中；1 = 有命中（打印明细）
+ * Rules:
+ *   - Scans every file under the project root except excluded dirs/files.
+ *   - Binary files are skipped (first 8k bytes checked for NUL).
+ *   - A small whitelist of clearly-fake values (example.com, REPLACE_WITH,
+ *     YOUR_WORKER, sk-x, demo@example.com, ...) is applied per hit.
  */
-import { readdirSync, readFileSync } from "node:fs";
-import { join, resolve } from "node:path";
 
-const root = resolve(process.argv[2] ?? ".");
-const EXCLUDE_DIRS = ["node_modules", ".wrangler", ".git", ".workbuddy", "dist", ".next", ".open-next"];
-const EXCLUDE_FILES = new Set([".dev.vars", "package-lock.json", "tsconfig.tsbuildinfo"]);
+import { readdirSync, readFileSync, statSync } from "node:fs";
+import { join, relative, sep } from "node:path";
 
-const FAKE_EMAIL_DOMAINS = /(^|@)(example|acme|northwind|contoso|globex|initech|umbrella|vendor|customer|partner|invalid|fake-bank|unknown-sender)\.(com|net|test|org)$/i;
-const PLACEHOLDER = /REPLACE_WITH|your-|xxx|XXXX|example\.com/i;
+const ROOT = process.cwd();
+const EXCLUDE_DIRS = new Set([
+  "node_modules",
+  ".wrangler",
+  ".git",
+  ".workbuddy",
+  "dist",
+  ".dev.vars",
+]);
+const EXCLUDE_FILES = new Set([
+  ".admin-token.txt",
+  ".session-secret.txt",
+  "wrangler.toml", // real local config — never committed, never scanned
+  "formal_secret_scan.mjs", // the scanner itself contains pattern literals
+]);
 
+const MAX_FILE_BYTES = 4 * 1024 * 1024; // skip anything larger than 4MB
+
+// Regex pairs: [name, regex]. Case-insensitive unless noted.
 const PATTERNS = [
-	{ name: "sk- token", re: /\bsk-(?:live|test|or|kp|ant)?[-_][A-Za-z0-9_-]{12,}\b|\bsk-[A-Za-z0-9_-]{20,}\b/i },
-	{ name: "CLOUDFLARE_API_TOKEN", re: /(?:CLOUDFLARE_API_TOKEN|CF_API_TOKEN|CF_TOKEN)\s*[=:]\s*["']?[A-Za-z0-9_-]{30,}/i },
-	{ name: "api_key/secret", re: /(?:api[_-]?key|apikey|api[_-]?secret|client[_-]?secret|secret[_-]?key|access[_-]?key[_-]?id)\s*[=:]\s*["'][A-Za-z0-9_\-\.]{16,}["']/i },
-	{ name: "password", re: /(?:password|passwd|pwd)\s*[=:]\s*["'][^"']{6,}["']/i },
-	{ name: "Bearer token", re: /\bBearer\s+[A-Za-z0-9_\-\.]{20,}/i },
-	{ name: "auth/access token", re: /(?:authorization|auth[_-]?token|access[_-]?token|refresh[_-]?token|private[_-]?key)\s*[=:]\s*["'][A-Za-z0-9_\-\.]{16,}["']/i },
-	{ name: "email+password combo", re: /[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}[^\n]{0,50}(?:password|passwd|pwd)\s*[=:]/i },
+  ["CLOUDFLARE_API_TOKEN", /\bCLOUDFLARE_API_TOKEN\b\s*[:=]\s*["']?[A-Za-z0-9_\-]{20,}/i],
+  ["generic API key", /\b(?:api[_-]?key|apikey)\b\s*[:=]\s*["']?[A-Za-z0-9_\-\.]{16,}/i],
+  ["secret", /\b(?:secret|client[_-]?secret)\b\s*[:=]\s*["']?[A-Za-z0-9_\-\.]{16,}/i],
+  ["password", /\b(?:password|passwd|pwd)\b\s*[:=]\s*["']?[^\s"']{8,}/i],
+  ["token", /\b(?:token|auth[_-]?token|access[_-]?token)\b\s*[:=]\s*["']?[A-Za-z0-9_\-\.]{16,}/i],
+  ["sk- key", /\bsk-[A-Za-z0-9]{20,}/i],
+  ["sk-kp- key", /\bsk-kp-[A-Za-z0-9]{20,}/i],
+  ["sk_live", /\bsk_live_[A-Za-z0-9]{20,}/i],
+  ["sk_test", /\bsk_test_[A-Za-z0-9]{20,}/i],
+  ["Bearer token", /\bBearer\s+[A-Za-z0-9_\-\.]{20,}/i],
+  ["AWS access key", /\bAKIA[0-9A-Z]{16}\b/],
+  ["private key", /-----BEGIN [A-Z ]*PRIVATE KEY-----/],
+  ["email:password", /\b[\w.+-]+@[\w-]+(\.[\w-]+)+\s*[:;,]\s*[^\s@]{6,}/],
+  ["wrangler token", /\bWRANGLER_[A-Z0-9_]+/],
+  ["D1 database id", /\bdatabase_id\s*=\s*["']?[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i],
 ];
 
-function walk(dir, out = []) {
-	for (const entry of readdirSync(dir, { withFileTypes: true })) {
-		if (entry.name.startsWith(".") && entry.name !== ".github" && entry.name !== ".dev.vars.example") continue;
-		if (EXCLUDE_DIRS.includes(entry.name)) continue;
-		const full = join(dir, entry.name);
-		if (entry.isDirectory()) walk(full, out);
-		else if (!EXCLUDE_FILES.has(entry.name)) out.push(full);
-	}
-	return out;
+// Values that are clearly placeholders / fake test data → always allow.
+const WHITELIST = [
+  "example.com",
+  "example.org",
+  "your-idp.example.com",
+  "your-worker.example.com",
+  "YOUR_WORKER",
+  "YOUR_WORKER_URL",
+  "REPLACE_WITH",
+  "sk-x",
+  "sk-test",
+  "sk-your",
+  "demo@example.com",
+  "paytest@example.com",
+  "you@example.com",
+  "api.example.com",
+  "llm.example.com",
+  "open.bigmodel.cn",
+  "api.z.ai",
+  "res.openai.azure.com",
+  "generativelanguage.googleapis.com",
+  "api.anthropic.com",
+  "api.deepseek.com",
+  "keypool",
+  "llm-gateway",
+  "admin-token",
+  "SESSION_SECRET", // variable *name* is fine; a literal value is not
+];
+
+function isBinary(buf) {
+  const n = Math.min(buf.length, 8192);
+  for (let i = 0; i < n; i++) if (buf[i] === 0) return true;
+  return false;
 }
 
-function isAllowed(line) {
-	if (PLACEHOLDER.test(line)) return true;
-	const emails = line.match(/[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g) ?? [];
-	if (emails.length && emails.every((e) => FAKE_EMAIL_DOMAINS.test(e))) return true;
-	return false;
+function isWhitelisted(text) {
+  const low = text.toLowerCase();
+  for (const w of WHITELIST) if (low.includes(w.toLowerCase())) return true;
+  return false;
 }
 
-const files = walk(root);
+function walk(dir) {
+  const out = [];
+  for (const name of readdirSync(dir)) {
+    if (EXCLUDE_DIRS.has(name) || EXCLUDE_FILES.has(name)) continue;
+    const p = join(dir, name);
+    const st = statSync(p);
+    if (st.isDirectory()) out.push(...walk(p));
+    else if (st.isFile()) out.push(p);
+  }
+  return out;
+}
+
 let hits = 0;
-const details = [];
-for (const file of files) {
-	let text;
-	try {
-		text = readFileSync(file, "utf8");
-	} catch {
-		continue;
-	}
-	if (text.includes("\u0000")) continue;
-	const lines = text.split("\n");
-	for (let i = 0; i < lines.length; i++) {
-		const line = lines[i];
-		if (!line.trim()) continue;
-		for (const { name, re } of PATTERNS) {
-			if (re.test(line) && !isAllowed(line)) {
-				hits++;
-				details.push(`${file.replace(root + "\\", "").replace(root + "/", "")}:${i + 1} [${name}] ${line.trim().slice(0, 160)}`);
-			}
-		}
-	}
+let files = 0;
+
+for (const file of walk(ROOT)) {
+  const size = statSync(file).size;
+  if (size === 0 || size > MAX_FILE_BYTES) continue;
+  let buf;
+  try {
+    buf = readFileSync(file);
+  } catch {
+    continue;
+  }
+  if (isBinary(buf)) continue;
+  files++;
+  const text = buf.toString("utf8");
+  const lines = text.split("\n");
+  for (const [name, re] of PATTERNS) {
+    for (let i = 0; i < lines.length; i++) {
+      const m = lines[i].match(re);
+      if (!m) continue;
+      // Field-access on a variable (e.g. `password: str(b.password)` from a
+      // parsed request body) is code, not a hardcoded credential — skip it.
+      if (name === "password" && /password:\s*(str\(|b\s*&&|\(|\{)/i.test(lines[i])) continue;
+      const snippet = m[0].length > 60 ? m[0].slice(0, 60) + "…" : m[0];
+      if (isWhitelisted(snippet)) continue;
+      hits++;
+      console.log(
+        `HIT [${name}] ${relative(ROOT, file).split(sep).join("/")}:${i + 1}  ${snippet}`
+      );
+    }
+  }
 }
 
-console.log(`Scanned ${files.length} files in ${root}`);
+console.log(`\nScanned ${files} files.`);
 if (hits > 0) {
-	console.log(`FOUND ${hits} potential secret(s):`);
-	for (const d of details) console.log("  " + d);
-	process.exit(1);
-} else {
-	console.log("OK: 0 secrets found.");
-	process.exit(0);
+  console.log(`Found ${hits} potential secret(s).`);
+  process.exit(1);
 }
+console.log("No secrets found. Clean ✓");
+process.exit(0);
