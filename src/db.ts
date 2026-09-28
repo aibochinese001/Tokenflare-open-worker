@@ -1464,6 +1464,10 @@ export interface ChannelRow {
   base_url: string;
   api_key: string;
   enabled: number;
+  protocol: string;
+  provider: string;
+  auth_type: string;
+  auth_header: string | null;
   created_at: number;
 }
 
@@ -1496,13 +1500,36 @@ export async function listChannels(env: Env): Promise<ChannelWithModels[]> {
 
 export async function createChannel(
   env: Env,
-  input: { name: string; base_url: string; api_key: string; enabled: boolean }
+  input: {
+    name: string;
+    base_url: string;
+    api_key: string;
+    enabled: boolean;
+    protocol?: string;
+    provider?: string;
+    auth_type?: string;
+    auth_header?: string | null;
+  }
 ): Promise<number> {
+  const protocol = input.protocol || "openai";
+  const provider = input.provider || protocol;
+  const authType = input.auth_type || "bearer";
+  const authHeader = input.auth_header || null;
   const res = await env.DB.prepare(
-    `INSERT INTO keypool_gateway_channels (name, base_url, api_key, enabled, created_at)
-     VALUES (?, ?, ?, ?, ?)`
+    `INSERT INTO keypool_gateway_channels (name, base_url, api_key, enabled, protocol, provider, auth_type, auth_header, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
   )
-    .bind(input.name, input.base_url, input.api_key, input.enabled ? 1 : 0, Date.now())
+    .bind(
+      input.name,
+      input.base_url,
+      input.api_key,
+      input.enabled ? 1 : 0,
+      protocol,
+      provider,
+      authType,
+      authHeader,
+      Date.now()
+    )
     .run();
   return Number(res.meta.last_row_id);
 }
@@ -1510,14 +1537,27 @@ export async function createChannel(
 export async function updateChannel(
   env: Env,
   id: number,
-  patch: { name?: string; base_url?: string; api_key?: string; enabled?: boolean }
+  patch: {
+    name?: string;
+    base_url?: string;
+    api_key?: string;
+    enabled?: boolean;
+    protocol?: string;
+    provider?: string;
+    auth_type?: string;
+    auth_header?: string | null;
+  }
 ): Promise<void> {
   const sets: string[] = [];
-  const vals: Array<string | number> = [];
+  const vals: Array<string | number | null> = [];
   if (patch.name !== undefined) { sets.push("name = ?"); vals.push(patch.name); }
   if (patch.base_url !== undefined) { sets.push("base_url = ?"); vals.push(patch.base_url); }
   if (patch.api_key !== undefined) { sets.push("api_key = ?"); vals.push(patch.api_key); }
   if (patch.enabled !== undefined) { sets.push("enabled = ?"); vals.push(patch.enabled ? 1 : 0); }
+  if (patch.protocol !== undefined) { sets.push("protocol = ?"); vals.push(patch.protocol); }
+  if (patch.provider !== undefined) { sets.push("provider = ?"); vals.push(patch.provider); }
+  if (patch.auth_type !== undefined) { sets.push("auth_type = ?"); vals.push(patch.auth_type); }
+  if (patch.auth_header !== undefined) { sets.push("auth_header = ?"); vals.push(patch.auth_header); }
   if (!sets.length) return;
   vals.push(id);
   await env.DB.prepare(`UPDATE keypool_gateway_channels SET ${sets.join(", ")} WHERE id = ?`).bind(...vals).run();
@@ -1589,9 +1629,20 @@ async function upsertPrice(env: Env, model: string, input: number, cached: numbe
 export async function listChannelRoutes(
   env: Env,
   model: string
-): Promise<Array<{ channel_id: number; name: string; base_url: string; api_key: string; model_id: string }>> {
+): Promise<Array<{
+  channel_id: number;
+  name: string;
+  base_url: string;
+  api_key: string;
+  model_id: string;
+  protocol: string;
+  provider: string;
+  auth_type: string;
+  auth_header: string | null;
+}>> {
   const res = await env.DB.prepare(
-    `SELECT ch.id AS channel_id, ch.name, ch.base_url, ch.api_key, cm.model_id
+    `SELECT ch.id AS channel_id, ch.name, ch.base_url, ch.api_key, cm.model_id,
+            ch.protocol, ch.provider, ch.auth_type, ch.auth_header
      FROM keypool_gateway_channel_models cm
      JOIN keypool_gateway_channels ch ON ch.id = cm.channel_id
      WHERE cm.model_id = ? AND ch.enabled = 1
@@ -1599,7 +1650,7 @@ export async function listChannelRoutes(
   )
     .bind(model)
     .all();
-  return (res.results ?? []) as unknown as Array<{ channel_id: number; name: string; base_url: string; api_key: string; model_id: string }>;
+  return (res.results ?? []) as unknown as Array<{ channel_id: number; name: string; base_url: string; api_key: string; model_id: string; protocol: string; provider: string; auth_type: string; auth_header: string | null }>;
 }
 
 /** All model ids configured on enabled channels (for /v1/models). */
