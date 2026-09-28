@@ -1,101 +1,90 @@
-# AGENTS.md — AI 部署指南（Tokenflare / cloudflare-llm-gateway）
+# AGENTS.md — AI deployment guide for cloudflare-llm-gateway
 
-> 给自动部署 agent 看的确定性执行清单。照单执行，不要猜。
+This file is written for AI agents and CI bots that deploy this Worker. Follow
+it literally — do not improvise commands, do not invent secrets, and do not
+guess values.
 
-## 0. 前置条件
-
-- Node.js 18+，已 `npm install`
-- Cloudflare 账号已登录：`npx wrangler whoami`（未登录先 `npx wrangler login`）
-- Token 权限（API Token 需勾选）：**Workers Scripts Edit、Workers D1 Edit、Workers KV Storage Edit（本仓库未用，可略）、Account Settings Read**；部署本身用 `wrangler login`（OAuth）或 `CLOUDFLARE_API_TOKEN` 环境变量亦可
-- 本仓库不依赖 R2 / Queues / Workers AI
-
-## 1. 快速部署（三步）
+## Quick deploy (3 commands, ~3 minutes)
 
 ```bash
 npm install
-npm run setup          # 建/复用 D1 `llm-gateway` → 回填 wrangler.toml → 应用 schema.sql
-npm run deploy         # npx wrangler deploy
+npm run setup          # logs you in → creates/reuses D1 `llm-gateway` →
+                       # writes its id into wrangler.toml → applies schema.sql
+npx wrangler secret put ADMIN_TOKEN   # required; anything long & random
+npx wrangler deploy    # prints your *.workers.dev URL
 ```
 
-部署后打开输出的 `*.workers.dev` 地址，用 `ADMIN_TOKEN` 登录管理台并导入上游密钥。
+`npm run setup` is deterministic: it verifies login, creates the D1 database
+(or reuses it), backfills `database_id`, applies `schema.sql`, and prints the
+remaining secret/deploy commands. Run it first; if it fails, fix what it
+reports and re-run.
 
-## 2. Secrets 清单
+## Required Cloudflare API token permissions
 
-| 变量 | 必填 | 干什么 | 获取方式 | 不填时行为 |
-|---|---|---|---|---|
-| `ADMIN_TOKEN` | ✅ 必填 | 管理后台/API 的 Bearer Token | 自行生成（`openssl rand -hex 24`） | 管理功能全部 401 |
-| `SESSION_SECRET` | 仅 SSO | 签名 SSO 会话/PKCE cookie，32+ 字节 | 自行生成 | SSO 登录关闭（降级为仅 ADMIN_TOKEN） |
-| `STRIPE_SECRET_KEY` | 仅计费 | Stripe 服务端密钥 | Stripe Dashboard | 在线充值入口隐藏（其余功能正常） |
-| `STRIPE_WEBHOOK_SECRET` | 仅计费 | 校验 Stripe webhook 签名 | Stripe Dashboard | 充值回调不生效 |
+Create the token in **Cloudflare Dashboard → My Profile → API Tokens → Create
+Token** with at least these permissions (Account scope):
 
-设置：`npx wrangler secret put <名字>`（逐个执行）。
+| Permission | Needed for |
+|---|---|
+| Workers Scripts Edit | deploy the Worker |
+| D1 Edit | create/execute the database & schema |
+| R2 Edit | (not used by this repo; include for future media buckets) |
+| Workers KV Storage Edit | (not used by this repo; include for future KV caches) |
+| Workers AI Edit | (not used by this repo; include for future AI bindings) |
 
-### Vars（wrangler.toml `[vars]`，非密钥，可直接改）
+The token itself must **never** be committed. Store it as a repo/CI secret
+(`CF_API_TOKEN`) or your local shell — the same applies to every secret below.
 
-| 变量 | 默认 | 说明 |
+## Secrets & variables checklist
+
+| Name | Required? | Purpose | Where to get it |
+|---|---|---|---|
+| `ADMIN_TOKEN` | **Required** | Bearer token for admin/API routes (`/admin/*`) and minted consumer tokens | Generate: `openssl rand -hex 32` |
+| `SESSION_SECRET` | Only for SSO | Signs session cookies (OIDC login) | `openssl rand -hex 32`; skip if not using OIDC |
+| `STRIPE_SECRET_KEY` | Only for billing | Stripe server-side charges | Stripe dashboard |
+| `STRIPE_WEBHOOK_SECRET` | Only for billing | Verifies `checkout.session.completed` webhooks | Stripe dashboard → webhooks |
+| `OIDC_ISSUER` (var) | Only for SSO | OIDC issuer URL | Your IdP (e.g. `https://your-idp.example.com`) |
+| `OIDC_CLIENT_ID` (var) | Only for SSO | OIDC client id | Your IdP |
+| `ADMIN_EMAIL` (var) | Only for SSO | First email = admin; others pending | Your email |
+
+**Degradation behavior when optional secrets are unset** (nothing crashes):
+
+- No `SESSION_SECRET`/OIDC vars → SSO login disabled; `ADMIN_TOKEN`-only auth
+  still works.
+- No Stripe keys → `/me/checkout` returns 503 "Payments not configured";
+  admin top-up (`/admin/balances/:sub/topup`) still works.
+- No `BILLING_ENABLED` → metering runs, but balances are not enforced.
+
+## Common errors
+
+| Symptom | Cause | Fix |
 |---|---|---|
-| `COOLDOWN_MINUTES` | `3` | 429/配额后 key 冷却分钟数 |
-| `MAX_KEY_RETRIES` | `4` | 单请求最多尝试的池内 key 数 |
-| `PROBE_INTERVAL_MINUTES` | `60` | cron 探测间隔 |
-| `BILLING_ENABLED` | 空 | `"1"` 开启信用余额计费 |
-| `BRAND_NAME` / `SSO_LABEL` / `SSO_NOTE` | — | 控制台品牌文案（可选） |
-| `OIDC_ISSUER` / `OIDC_CLIENT_ID` / `ADMIN_EMAIL` | — | SSO（OIDC）配置；`ADMIN_EMAIL` 对应邮箱登录即管理员 |
-| `DEFAULT_PRICE_MICRO` | `500000` | 未定价模型的回退价格（micro-USD / 1M tokens） |
-| `DISCOUNT` | `1` | 全局售价折扣（`0.1` = 1 折） |
-| `SIGNUP_BONUS_USD` | — | 新用户一次性赠送余额（USD） |
-| `PUBLIC_BASE_URL` / `CURRENCY` | — | Stripe 跳转基址 / 币种（默认 usd） |
-| `TRANSACTION_RETENTION_DAYS` / `PENDING_ORDER_RETENTION_DAYS` / `LOG_RETENTION_DAYS` | 90/30/30 | 数据保留天数（cron 清理） |
+| `✘ [ERROR] A request to the Cloudflare API (...) failed` during `setup` | Not logged in or bad token | `npx wrangler login` (browser) or set `CLOUDFLARE_API_TOKEN`; verify permissions (Workers Scripts Edit + D1 Edit) |
+| `Error: D1 database "llm-gateway" already exists` | DB created on a previous run | Fine — `setup.mjs` detects it and reuses it; just re-run |
+| `✘ The request to the Cloudflare API was unauthorized` on deploy | Token lacks Workers Scripts Edit | Update the token permissions and re-login |
+| `✘ Raw SQL Error` on schema apply | Schema ran twice (table exists) | `npx wrangler d1 execute llm-gateway --remote --command "DROP TABLE IF EXISTS keypool_gateway_api_keys"` then re-run setup (or ignore: schema is idempotent-safe per table) |
+| `Error: You are not logged in` | No wrangler session | `npx wrangler login` |
+| `Missing secret ADMIN_TOKEN` at runtime | Secret never set | `npx wrangler secret put ADMIN_TOKEN` |
+| 503 from `/me/checkout` | Stripe not configured | Set Stripe secrets or use admin top-up |
 
-## 3. 常见报错对照表
-
-| 报错 | 原因 | 处理 |
-|---|---|---|
-| `Missing api_token` / `Could not find account` | 未登录 | `npx wrangler login` 或导出 `CLOUDFLARE_API_TOKEN` |
-| `D1: database does not exist` | 没跑 setup | `npm run setup`（自动创建） |
-| `table keypool_gateway_users already exists` | schema 重复执行 | 幂等可忽略；若需清库：先 `wrangler d1 delete llm-gateway` 再 `npm run setup` |
-| `401` 访问管理台 | `ADMIN_TOKEN` 未设置或不匹配 | `npx wrangler secret put ADMIN_TOKEN` |
-| `SSO not configured` (503) | 启用了 SSO 页面但没配齐 | 填齐 `OIDC_ISSUER`+`OIDC_CLIENT_ID`+`SESSION_SECRET`，或仅用 ADMIN_TOKEN |
-| 上游 `401/403` 后 key 被自动禁用 | 上游密钥失效 | 管理台 `检测全部` / `POST /admin/check-all-keys` 会重新探测复活 |
-| cron 触发数超免费额度(5) | 免费计划限制 | 删掉 `[triggers]`，改用外部 pinger 定时 `POST /admin/sweep`（见 `.github/workflows/keypool-health.yml`） |
-
-## 4. 项目结构速览
+## Repo layout
 
 ```
-src/
-  index.ts         入口：Hono 路由装配 + /manifest.json + /sw.js + cron
-  types.ts         Env 类型与 Provider 契约（不要改签名）
-  db.ts            D1 数据访问层 + 建表/设置
-  keypool.ts       密钥池：自愈、冷却退避、复活
-  probe.ts         探测（1-token liveness / 余额 / 模型可用性）
-  oidc.ts          SSO 登录（OIDC PKCE）+ 邮箱验证码 + 会话
-  auth.ts          Bearer Token 鉴权
-  chat.ts          /v1 流式与普通补全（OpenAI 兼容）
-  payone.ts        易支付（第三方收款）轮询对账
-  smtp.ts          SMTP 发信（QQ 邮箱等，配置存 settings 表）
-  ui.ts            内嵌管理/用户控制台（单文件 HTML）
-  i18n.ts          中英文界面文案
-  routes/          admin.ts / me.ts / openai.ts / passthrough.ts / pay.ts
-  providers/       各上游 provider 适配（gemini/mistral/…/channel 手动通道）
-schema.sql         D1 初始 schema（npm run setup 自动应用）
-migration-*.sql    增量迁移（已在生产库执行过，勿重复跑）
-wrangler.toml      本地真实配置（已被 .gitignore 排除，不入库）
-wrangler.toml.example  入库模板（database_id 占位）
-admin.ps1          管理 CLI（读取 .admin-token.txt；URL 占位需替换）
-deploy.sh          一行部署脚本（幂等）
+src/index.ts            Worker entrypoint (Hono wiring, PWA manifest/sw)
+src/routes/             admin.ts · me.ts · openai.ts · passthrough.ts · pay.ts
+src/providers/          18 upstream adapters + types
+src/                    db.ts · keypool.ts · probe.ts · cron.ts · oidc.ts · ui.ts · ...
+scripts/setup.mjs       deterministic bootstrap (npm run setup)
+scripts/formal_secret_scan.mjs   secret scanner (npm run scan:secrets)
+schema.sql              D1 schema (applied by setup)
+wrangler.toml.example   safe template — copy to wrangler.toml
 ```
 
-## 5. 安全与隐私检查
+## Before pushing anything
 
 ```bash
-npm run scan:secrets   # 全盘敏感模式扫描（node scripts/formal_secret_scan.mjs）
+npm run scan:secrets    # must exit 0 (no secrets found)
 ```
 
-- 密钥一律走 `wrangler secret put`，**不要**写进 `wrangler.toml` 或代码
-- `wrangler.toml`、`.admin-token.txt`、`.session-secret.txt` 已被 `.gitignore` 排除，勿强推
-- 数据库里存的 keys/tokens 均为密文哈希或待用池密钥，管理台 API 已做脱敏
-
-## 6. 部署后自检
-
-1. `GET https://<worker>/healthz` → `{"ok":true}`
-2. 管理台登录 → 导入 `provider:key` 行 → `检测全部` 应全部 active
-3. `POST /v1/chat/completions` 用用户 token 调用一个模型，观察响应头 `X-KeyPool-*`
+Never commit `wrangler.toml` (real D1 id), `.admin-token.txt`,
+`.session-secret.txt`, or any `*.log`.
