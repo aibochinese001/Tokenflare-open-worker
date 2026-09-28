@@ -5,6 +5,9 @@ CREATE TABLE IF NOT EXISTS keypool_gateway_channels (
   base_url   TEXT NOT NULL,
   api_key    TEXT NOT NULL,
   enabled    INTEGER NOT NULL DEFAULT 1,
+  protocol   TEXT NOT NULL DEFAULT 'openai',
+  auth_type  TEXT NOT NULL DEFAULT 'bearer',
+  auth_header TEXT,
   created_at INTEGER NOT NULL
 );
 CREATE TABLE IF NOT EXISTS keypool_gateway_channel_models (
