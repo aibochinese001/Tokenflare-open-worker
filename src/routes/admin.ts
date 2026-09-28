@@ -167,6 +167,7 @@ app.get("/channels", async (c) => {
 app.post("/channels", async (c) => {
   const body = (await c.req.json().catch(() => null)) as {
     name?: unknown; base_url?: unknown; api_key?: unknown; enabled?: unknown;
+    protocol?: unknown; provider?: unknown; auth_type?: unknown; auth_header?: unknown;
   } | null;
   if (!body) return c.json({ error: { message: "无效的请求" } }, 400);
   const name = String(body.name || "").trim();
@@ -175,11 +176,22 @@ app.post("/channels", async (c) => {
   if (!name || !baseUrl || !apiKey) {
     return c.json({ error: { message: "渠道名称、接口地址、API Key 均必填" } }, 400);
   }
+  const protocol = String(body.protocol || "openai");
+  const provider = String(body.provider || protocol);
+  const authType = String(body.auth_type || "bearer");
+  const authHeader =
+    body.auth_header === undefined || body.auth_header === null || String(body.auth_header).trim() === ""
+      ? null
+      : String(body.auth_header).trim();
   const id = await createChannel(c.env, {
     name,
     base_url: baseUrl,
     api_key: apiKey,
     enabled: body.enabled !== false,
+    protocol,
+    provider,
+    auth_type: authType,
+    auth_header: authHeader,
   });
   return c.json({ ok: true, id });
 });
@@ -190,14 +202,22 @@ app.patch("/channels/:id", async (c) => {
   if (!Number.isFinite(id) || id <= 0) return c.json({ error: { message: "无效的渠道 ID" } }, 400);
   const body = (await c.req.json().catch(() => null)) as {
     name?: unknown; base_url?: unknown; api_key?: unknown; enabled?: unknown;
+    protocol?: unknown; provider?: unknown; auth_type?: unknown; auth_header?: unknown;
   } | null;
   if (!body) return c.json({ error: { message: "无效的请求" } }, 400);
-  const patch: { name?: string; base_url?: string; api_key?: string; enabled?: boolean } = {};
+  const patch: {
+    name?: string; base_url?: string; api_key?: string; enabled?: boolean;
+    protocol?: string; provider?: string; auth_type?: string; auth_header?: string | null;
+  } = {};
   if (typeof body.name === "string") patch.name = body.name.trim();
   if (typeof body.base_url === "string") patch.base_url = body.base_url.trim();
   let key = typeof body.api_key === "string" ? body.api_key.trim() : "";
   if (key && !key.includes("••••")) patch.api_key = key;
   if (typeof body.enabled === "boolean") patch.enabled = body.enabled;
+  if (typeof body.protocol === "string") patch.protocol = body.protocol;
+  if (typeof body.provider === "string") patch.provider = body.provider;
+  if (typeof body.auth_type === "string") patch.auth_type = body.auth_type;
+  if (typeof body.auth_header === "string") patch.auth_header = body.auth_header;
   await updateChannel(c.env, id, patch);
   return c.json({ ok: true });
 });
