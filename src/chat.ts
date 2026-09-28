@@ -11,6 +11,13 @@
 import type { Env } from "./types";
 import { listChannelRoutes } from "./db";
 import { extractUsage, scanStreamForUsage } from "./keypool";
+import {
+  channelEndpoint,
+  channelHeaders,
+  channelPayload,
+  adaptJsonResponse,
+  adaptStream,
+} from "./adapters";
 import type { ExtractedUsage } from "./keypool";
 import type { OpenAIChatRequest } from "./providers/types";
 import {
@@ -35,6 +42,10 @@ export interface ChannelRoute {
   base_url: string;
   api_key: string;
   model_id: string;
+  protocol: string;
+  provider: string;
+  auth_type: string;
+  auth_header: string | null;
 }
 
 const EMPTY_USAGE: ExtractedUsage = {
@@ -90,16 +101,14 @@ async function channelAttempt(
   final: boolean
 ): Promise<Response> {
   const started = Date.now();
-  const headers: Record<string, string> = {
-    "content-type": "application/json",
-    authorization: `Bearer ${route.api_key}`,
-  };
+  const headers = channelHeaders(route, route.api_key);
+  const payload = channelPayload(route.protocol, body);
   let res: Response;
   try {
-    res = await fetch(upstreamUrl(route.base_url), {
+    res = await fetch(channelEndpoint(route.base_url, route.protocol, route.provider), {
       method: "POST",
       headers,
-      body: JSON.stringify(body),
+      body: JSON.stringify(payload),
     });
   } catch (err) {
     await logRequest(env, {
@@ -129,6 +138,8 @@ async function channelAttempt(
     // Streaming (SSE): return one half, scan the other for usage.
     if (ct.includes("text/event-stream") && res.body) {
       const [clientStream, scanStream] = res.body.tee();
+      const streamAdapter = adaptStream(route.protocol, body.model);
+      const outgoing = streamAdapter ? clientStream.pipeThrough(streamAdapter) : clientStream;
       const logId = await logRequest(env, {
         provider: "channel",
         keyId: null,
@@ -144,13 +155,15 @@ async function channelAttempt(
       ctx.waitUntil(
         scanStreamForUsage(env, scanStream, logId, caller.ownerSub, body.model, promptChars)
       );
-      return new Response(clientStream, { status, headers: res.headers });
+      return new Response(outgoing, { status, headers: res.headers });
     }
 
     // Non-streaming: bill from the usage object when present, else estimate.
     let usage: ExtractedUsage = { ...EMPTY_USAGE };
+    let upstreamJson: unknown = null;
     try {
-      usage = extractUsage(await res.clone().json());
+      upstreamJson = await res.clone().json();
+      usage = extractUsage(upstreamJson);
     } catch {
       // not JSON / parse error — fall through to estimation
     }
@@ -204,6 +217,14 @@ async function channelAttempt(
       final: true,
     });
     await chargeForUsage(env, caller.ownerSub, body.model, uncachedPrompt, cachedPrompt, completionTokens, estimated);
+    if (route.protocol === "anthropic" && upstreamJson !== null) {
+      const adapted = adaptJsonResponse(route.protocol, body, upstreamJson);
+      const bodyOut = JSON.stringify(adapted);
+      const headersOut = new Headers(res.headers);
+      headersOut.set("content-type", "application/json; charset=utf-8");
+      headersOut.delete("content-encoding");
+      return new Response(bodyOut, { status, headers: headersOut });
+    }
     return res;
   }
 
