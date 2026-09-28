@@ -12,7 +12,7 @@ echo "==> 0/5 verify auth"
 $WR whoami >/dev/null
 
 echo "==> 1/5 ensure D1 database '$DB_NAME'"
-DB_ID="$($WR d1 list --json 2>/dev/null | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{const a=JSON.parse(s);const m=a.find(x=>x.name==="'"$DB_NAME"'");process.stdout.write(m?m.uuid:"")}catch(e){process.stdout.write("")}})') "
+DB_ID="$($WR d1 list --json 2>/dev/null | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{const a=JSON.parse(s);const m=a.find(x=>x.name==="'"$DB_NAME"'");process.stdout.write(m?m.uuid:"")}catch(e){process.stdout.write("")}})')"
 if [ -z "$DB_ID" ]; then
   echo "    creating..."
   $WR d1 create "$DB_NAME" >/dev/null
