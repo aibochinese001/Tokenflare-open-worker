@@ -1,88 +1,106 @@
 #!/usr/bin/env node
 /**
- * setup.mjs — 一键准备 D1 数据库并把 database_id 写回 wrangler.toml。
+ * setup.mjs — deterministic one-shot bootstrap for a fresh Cloudflare account.
  *
- * 用法：
- *   npm run setup            # 交互式逐步执行
- *   npm run setup -- --json  # 机器可读输出（agent 友好）
+ * Usage:  npm run setup            (interactive-ish, prints next steps)
+ *         npm run setup -- --json  (machine-readable JSON on stdout)
  *
- * 步骤：校验登录 → 建/复用 D1 `llm-gateway` → 回填 database_id →
- *       应用 schema.sql → 打印剩余步骤（secrets、deploy）。
- * 幂等：D1 已存在则直接复用。
+ * What it does, in order:
+ *   1. Verifies `wrangler` is logged in (`wrangler whoami`).
+ *   2. Creates the D1 database `llm-gateway` (or reuses it if it exists).
+ *   3. Writes the real database_id back into `wrangler.toml`.
+ *   4. Applies `schema.sql` to the remote D1 database.
+ *   5. Prints the exact secret/deploy commands left to run.
+ *
+ * It never asks for secrets and never writes them anywhere.
  */
-import { execFileSync } from "node:child_process";
+
+import { execSync } from "node:child_process";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
-import { join, dirname } from "node:path";
-import { fileURLToPath } from "node:url";
+import { join } from "node:path";
 
-const root = dirname(dirname(fileURLToPath(import.meta.url)));
-const TOML = join(root, "wrangler.toml");
-const SCHEMA = join(root, "schema.sql");
+const ROOT = process.cwd();
+const TOML = join(ROOT, "wrangler.toml");
+const SCHEMA = join(ROOT, "schema.sql");
 const DB_NAME = "llm-gateway";
-const json = process.argv.includes("--json");
 
-function run(args, opts = {}) {
-  return execFileSync("npx", ["wrangler", ...args], {
-    cwd: root,
-    encoding: "utf8",
-    stdio: opts.silent ? "pipe" : "inherit",
-    ...opts,
-  });
+const json = process.argv.includes("--json");
+const out = {};
+const log = (...a) => { if (!json) console.log(...a); };
+
+function run(cmd) {
+  log(`\n$ ${cmd}`);
+  return execSync(cmd, { cwd: ROOT, stdio: ["ignore", "pipe", "pipe"] }).toString().trim();
 }
 
-function step(label) {
-  if (!json) console.log(`\n==> ${label}`);
+function fail(msg, code = 1) {
+  if (json) {
+    out.ok = false;
+    out.error = msg;
+    console.log(JSON.stringify(out, null, 2));
+  } else {
+    console.error(`\n✗ ${msg}`);
+  }
+  process.exit(code);
 }
 
 try {
-  step("0/4 校验 Cloudflare 登录 (wrangler whoami)");
-  run(["whoami"], { silent: true });
+  // 1. whoami
+  const who = run("npx wrangler whoami");
+  const email = (who.match(/Email\s*[:]\s*(\S+)/i) || [])[1] || "unknown";
+  log(`✓ logged in as ${email}`);
+  out.account = email;
 
-  step("1/4 确保 D1 数据库存在: " + DB_NAME);
-  let dbId = "";
+  // 2. D1 create (or reuse)
+  let databaseId = "";
   try {
-    const list = JSON.parse(run(["d1", "list", "--json"], { silent: true }));
-    dbId = list.find((d) => d.name === DB_NAME)?.uuid ?? "";
-  } catch {
-    dbId = "";
+    const created = run(`npx wrangler d1 create ${DB_NAME}`);
+    const m = created.match(/\b([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\b/i);
+    if (m) databaseId = m[1];
+  } catch (e) {
+    // Already exists — pull its id from the list output.
+    const list = run("npx wrangler d1 list --json");
+    try {
+      const rows = JSON.parse(list);
+      const hit = rows.find((r) => r.database_name === DB_NAME || r.name === DB_NAME);
+      if (hit) databaseId = hit.database_id || hit.uuid || "";
+    } catch {
+      /* ignore parse errors; fail below if no id */
+    }
   }
-  if (!dbId) {
-    run(["d1", "create", DB_NAME]);
-    const list = JSON.parse(run(["d1", "list", "--json"], { silent: true }));
-    dbId = list.find((d) => d.name === DB_NAME)?.uuid ?? "";
-    if (!dbId) throw new Error("创建 D1 后仍取不到 database_id");
-  }
-  if (!json) console.log(`    database_id=${dbId}`);
+  if (!databaseId) fail("Could not determine the D1 database id. Run `npx wrangler d1 list` manually.");
+  log(`✓ D1 database ready: ${DB_NAME} (${databaseId})`);
+  out.database_id = databaseId;
 
-  step("2/4 把 database_id 回填到 wrangler.toml");
-  if (!existsSync(TOML)) throw new Error("缺少 wrangler.toml，请先 cp wrangler.toml.example wrangler.toml");
-  const toml = readFileSync(TOML, "utf8").replace(
-    /(database_id\s*=\s*")[^"]*(")/,
-    `$1${dbId}$2`,
-  );
-  writeFileSync(TOML, toml);
-
-  step("3/4 应用 schema.sql 到远程 D1");
-  run(["d1", "execute", DB_NAME, "--remote", "--file=" + SCHEMA]);
-
-  step("4/4 完成");
-  const reminder = [
-    "",
-    "下一步（按顺序）：",
-    "  1. npx wrangler secret put ADMIN_TOKEN        # 管理后台/API Bearer Token（必填）",
-    "  2. npx wrangler secret put SESSION_SECRET     # 32+ 字节随机串（启用 SSO 时必填）",
-    "  3. （可选）npx wrangler secret put STRIPE_SECRET_KEY / STRIPE_WEBHOOK_SECRET",
-    "  4. npx wrangler deploy                        # 部署",
-    "",
-    "管理员控制台：打开部署后的 URL（workers.dev），用 ADMIN_TOKEN 登录并导入上游密钥。",
-  ].join("\n");
-  if (json) {
-    console.log(JSON.stringify({ ok: true, database_id: dbId, database_name: DB_NAME }));
+  // 3. write id back into wrangler.toml
+  if (!existsSync(TOML)) fail(`wrangler.toml not found (${TOML}). Copy wrangler.toml.example first.`);
+  let toml = readFileSync(TOML, "utf8");
+  if (toml.includes("REPLACE_WITH_YOUR_D1_DATABASE_ID")) {
+    toml = toml.replace(/database_id\s*=\s*"REPLACE_WITH_YOUR_D1_DATABASE_ID"/, `database_id = "${databaseId}"`);
+    writeFileSync(TOML, toml);
+    log("✓ wrote database_id into wrangler.toml");
   } else {
-    console.log(reminder);
+    log("• wrangler.toml already has a database_id — left as-is");
   }
-} catch (err) {
-  if (json) console.log(JSON.stringify({ ok: false, error: String(err?.message ?? err) }));
-  else console.error("\n失败：" + (err?.message ?? err));
-  process.exit(1);
+
+  // 4. apply schema
+  if (!existsSync(SCHEMA)) fail(`schema.sql not found (${SCHEMA}).`);
+  run(`npx wrangler d1 execute ${DB_NAME} --remote --file=${SCHEMA}`);
+  log("✓ schema.sql applied to remote D1");
+  out.schema_applied = true;
+
+  // 5. next steps
+  log("\nNext steps (copy-paste):");
+  log(`  npx wrangler secret put ADMIN_TOKEN         # required — admin/API bearer token`);
+  log(`  npx wrangler secret put SESSION_SECRET      # only if you enable OIDC SSO`);
+  log(`  npx wrangler deploy`);
+  log(`\nOpen the printed *.workers.dev URL for the admin console.`);
+
+  if (json) {
+    out.ok = true;
+    out.next = ["secret put ADMIN_TOKEN", "secret put SESSION_SECRET (optional)", "wrangler deploy"];
+    console.log(JSON.stringify(out, null, 2));
+  }
+} catch (e) {
+  fail(String(e.message || e));
 }
