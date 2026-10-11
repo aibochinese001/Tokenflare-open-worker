@@ -1,89 +1,60 @@
-# cloudflare-llm-gateway
+# Tokenflare - 无服务器 LLM API 网关
 
-A serverless, **OpenAI-compatible LLM API gateway** for **Cloudflare Workers** — a
-[new-api](https://github.com/QuantumNous/new-api) / [one-api](https://github.com/songquanpeng/one-api)
-style gateway that runs entirely on the **free tier** (Workers + D1, no server, no Redis).
+**无服务器，适配 Cloudflare Workers 零成本部署的 API 中转站**
 
-![cloudflare-llm-gateway — pool many AI keys behind one OpenAI-compatible API on Cloudflare](assets/hero.png)
+一个完全运行在 Cloudflare 免费层上的 **OpenAI 兼容 LLM API 网关**，聚合大语言模型 API Key 分发，支持多用户和收银系统。
 
-Pool many upstream AI API keys behind one stable OpenAI-compatible endpoint.
-Dead keys auto-disable, rate-limited keys cool down with progressive backoff and
-auto-revive, requests fall back across providers so callers never see a 503, and
-you get a built-in admin/consumer console — all on the free tier.
+![Tokenflare — 在 Cloudflare Workers 上，用一个 OpenAI 兼容 API 统一管理多个 AI 服务 API Key](assets/hero.png)
 
-## Features
+## 核心特性
 
-- **9 providers, OpenAI-compatible** — Gemini, Mistral, OpenRouter, OpenAI, DeepSeek, Groq, Moonshot (Kimi), GLM (Zhipu), Qwen (DashScope). One `POST /v1/chat/completions` + `GET /v1/models`; route by model name or an explicit `provider:model` prefix. Native passthrough at `/gemini/*`, `/mistral/*`, … too.
-- **Self-healing key pool** — round-robin across active keys; `401/403`/arrears → auto-disable, `429`/quota → cooldown with **progressive backoff**, success → revive. Liveness probes use a real 1-token call (not a `/models` endpoint that lies about suspended/throttled accounts).
-- **Auto-fallback** — if the chosen provider is down/throttled, the request is transparently served by another provider with live keys (response carries `X-KeyPool-Provider/Model/Fallback`); opt out per request with `{"fallback": false}`. Callers never get a 503.
-- **Model-level availability** — models that a key can't actually serve (paid-only, not-found) are probed and hidden from `GET /v1/models`, so users only pick models that work.
-- **Per-key console** — every key (masked) with status, stats, last error, and a live "检测全部" batch check (OpenRouter/DeepSeek show real balance); enable/disable/delete; disabled keys hidden by default.
-- **Roles + SSO** — optional OIDC SSO (Authorization Code + PKCE) with an admin-approval gate, or simple bearer-token auth. Admins manage the pool and aren't metered; consumers self-serve their own tokens.
-- **Metering & billing** — per-request + per-token usage with daily charts and logs; optional credit billing (per-model input/output pricing, a global discount, per-token deduction) with Stripe top-up. Off by default.
-- **Token controls** — per-token quota, RPM limit, and expiry.
-- **Built-in chat** — consumer chat playground (streaming) and an admin per-key debug chat.
-- **$0 to run** — Cloudflare Workers + D1 free tier; unattended health-check via cron or an included GitHub Actions schedule.
+- **9 个 AI 提供商，完全 OpenAI 兼容** — Gemini、Mistral、OpenRouter、OpenAI、DeepSeek、Groq、Moonshot (Kimi)、GLM (智谱)、Qwen (阿里云)。一个统一的 `POST /v1/chat/completions` + `GET /v1/models` 端点
+- **自愈 Key 池** — 轮询活跃 Key；`401/403`/欠费 → 自动禁用，`429`/限流 → 智能冷却（渐进式退避），成功 → 自动恢复
+- **自动降级** — 如果选中的提供商宕机或限流，请求自动透明转发给其他活跃 Key 的提供商（响应头包含 `X-KeyPool-Provider/Model/Fallback`）
+- **模型级可用性** — 自动探测 Key 实际支持的模型，隐藏无法使用的模型，用户只能选择真正可用的模型
+- **消费者控制台** — 每个 Key（已脱敏）显示状态、统计、最后错误、实时"检测全部"批量检查功能；支持启用/禁用/删除
+- **角色 + SSO** — 可选的 OIDC SSO 登录（授权码 + PKCE），管理员审核网关，支持简单的 Bearer Token 认证
+- **计量与计费** — 按请求 + 按 Token 统计，每日图表和日志；可选的积分制计费（按模型定价、全局折扣、Token 扣费），支持 Stripe 支付
+- **Token 控制** — 单 Token 配额、RPM 限制、过期时间控制
+- **内置聊天** — 消费者聊天游乐场（流式响应）和管理员 Key 调试聊天
+- **完全免费** — 运行在 Cloudflare Workers + D1 免费层；通过 Cron 或 GitHub Actions 定时健康检查
 
-## Architecture
+## 架构
 
 ```
-client ──▶ Worker (Hono) ──▶ pick active key ──▶ upstream provider
-                │                                    (Gemini/Mistral/OpenRouter)
-                ├─ D1: keys, tokens, users, logs
-                └─ cron / POST /admin/probe: revive cooldowns, probe disabled keys
+客户端 ──▶ Worker (Hono) ──▶ 选择活跃 Key ──▶ 上游提供商
+              │                              (Gemini/Mistral/OpenRouter 等)
+              ├─ D1: Key、Token、用户、日志
+              └─ Cron / POST /admin/probe: 恢复冷却、探测禁用 Key
 ```
 
-Keys self-heal: a `429`/quota error cools a key down, a `401`/`403` disables it,
-and both auto-revive (on a successful retry, or via the cron / `/admin/probe`).
+Key 自动恢复：`429`/限流使 Key 进入冷却，`401`/`403` 禁用 Key，两者都能自动恢复（成功重试时或通过 Cron/`/admin/probe`）。
 
-![self-healing key pool: active → cooldown on 429, active → disabled on 401, both auto-revive back to active](assets/self-healing.png)
+## 快速开始
 
-> **Deploying with AI / CI?** Read [AGENTS.md](AGENTS.md) — deterministic
-> `npm run setup`, the full secrets checklist, token permissions, and a common
-> errors table. For humans, the manual steps are right below.
+详细的部署步骤请参考 [AGENTS.md](AGENTS.md)。
 
-## Setup
+> **用 AI Agent 自动化部署？** 
+> 
+> 请阅读完整的 [AI Agent 自动化部署教程](https://opcgrow.org/article.php?id=137)
 
-```bash
-npm install
+## API 核心端点
 
-# 1. create the D1 database, then paste its id into wrangler.toml
-npx wrangler d1 create llm-gateway
-cp wrangler.toml.example wrangler.toml      # edit database_id (+ optional SSO vars)
-
-# 2. apply the schema
-npx wrangler d1 execute llm-gateway --remote --file=./schema.sql
-
-# 3. set secrets
-npx wrangler secret put ADMIN_TOKEN         # bearer token for admin/API
-npx wrangler secret put SESSION_SECRET      # random 32+ bytes (for SSO sessions)
-
-# 4. deploy
-npx wrangler deploy
-```
-
-Open the deployed URL to reach the admin console.
-
-## API
-
-| Method & path | Auth | Purpose |
+| 方法 & 路径 | 认证 | 用途 |
 |---|---|---|
-| `POST /v1/chat/completions` | user token / session | OpenAI-compatible chat |
-| `GET /v1/models` | user token / session | list available models |
-| `/gemini/*` `/mistral/*` `/openrouter/*` | user token / session | native passthrough |
-| `POST /admin/keys/import` | admin | bulk-import `provider:key` lines |
-| `GET /admin/keys/list` | admin | every key + stats |
-| `POST /admin/keys/:id/check` | admin | live liveness / balance probe |
-| `POST /admin/keys/:id/enable\|disable`, `DELETE /admin/keys/:id` | admin | per-key ops |
-| `GET /admin/users`, `POST /admin/users/:id/approve\|block` | admin | approve consumers |
-| `GET/POST/DELETE /me/tokens` | session | consumers manage their own tokens |
-| `POST /admin/check-all-keys` | admin | batch probe: revive healthy, disable dead |
-| `POST /admin/probe-models` / `GET /admin/models-status` | admin | model-level availability |
-| `GET /admin/usage` `/admin/logs` `/me/usage` `/me/logs` | admin / session | metering |
-| `GET /admin/balances` `POST /admin/balances/:sub/topup` `/admin/prices` | admin | billing |
-| `POST /me/checkout` `POST /stripe/webhook` | session / none | Stripe credit top-up |
+| `POST /v1/chat/completions` | 用户 Token / 会话 | OpenAI 兼容聊天 |
+| `GET /v1/models` | 用户 Token / 会话 | 列出可用模型 |
+| `POST /admin/keys/import` | 管理员 | 批量导入 `provider:key` |
+| `GET /admin/keys/list` | 管理员 | 所有 Key + 统计 |
+| `POST /admin/keys/:id/check` | 管理员 | 实时 Key 检测 / 余额探测 |
+| `GET/POST/DELETE /me/tokens` | 会话 | 消费者自助管理 Token |
+| `GET /admin/usage` `/admin/logs` `/me/usage` `/me/logs` | 管理员 / 会话 | 计量统计 |
+| `GET /admin/balances` `POST /admin/balances/:sub/topup` | 管理员 | 计费管理 |
+| `POST /me/checkout` | 会话 | Stripe 积分充值 |
 
-### Import keys
+## 使用示例
+
+### 导入 API Key
 
 ```bash
 curl https://YOUR_WORKER/admin/keys/import \
@@ -92,23 +63,24 @@ curl https://YOUR_WORKER/admin/keys/import \
   -d '{"keys":"gemini:AIza...\nmistral:...\nopenrouter:sk-or-v1-..."}'
 ```
 
-### Use it
+### 发送聊天请求
 
 ```bash
 curl https://YOUR_WORKER/v1/chat/completions \
   -H "Authorization: Bearer <user-token>" \
   -H 'content-type: application/json' \
-  -d '{"model":"mistral-small-latest","messages":[{"role":"user","content":"hi"}]}'
+  -d '{"model":"mistral-small-latest","messages":[{"role":"user","content":"你好"}]}'
 ```
 
-## Notes
+## 重要说明
 
-- **Terms of service:** aggregating / sharing / reselling provider API keys may
-  violate the upstream providers' terms. Use it to pool **your own** keys, and
-  review each provider's ToS before exposing it to others.
-- SSO is optional — leave `OIDC_*` unset to run with `ADMIN_TOKEN` + minted
-  tokens only.
+- **服务条款** — 聚合/共享/转售提供商 API Key 可能违反上游提供商的服务条款。请用此项目汇聚**自己的** Key，并在向他人公开前仔细阅读各提供商的使用条款。
+- **SSO 可选** — 不设置 `OIDC_*` 环境变量时，将以 `ADMIN_TOKEN` + 生成的 Token 模式运行。
 
-## License
+## 授权
 
 MIT
+
+---
+
+**📚 完整的 AI Agent 自动化部署教程：** [https://opcgrow.org/article.php?id=137](https://opcgrow.org/article.php?id=137)
