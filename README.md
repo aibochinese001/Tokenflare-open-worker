@@ -4,7 +4,7 @@
 
 一个完全运行在 Cloudflare 免费层上的 **OpenAI 兼容 LLM API 网关**，聚合大语言模型 API Key 分发，支持多用户和收银系统。
 
-https://cf.aibochinese.com/new-m/2610/%E5%B1%8F%E5%B9%95%E6%88%AA%E5%9B%BE%202026-10-11%20162708.png
+![Tokenflare 产品演示](https://cf.aibochinese.com/new-m/2610/%E5%B1%8F%E5%B9%95%E6%88%AA%E5%9B%BE%202026-10-11%20162708.png)
 
 ## 核心特性
 
